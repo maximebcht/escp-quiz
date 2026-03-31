@@ -30,6 +30,11 @@ export default function DashboardPage() {
       supabase.from('quiz_attempts').select('*, quizzes(*)').eq('user_id', user.id).order('completed_at', { ascending: false }).limit(10),
     ])
 
+console.log('profileRes', profileRes)
+console.log('subjectsRes', subjectsRes)
+console.log('quizzesRes', quizzesRes)
+console.log('attemptsRes', attemptsRes)
+    
     setProfile(profileRes.data)
     setSubjects(subjectsRes.data || [])
     setQuizzes(quizzesRes.data || [])
