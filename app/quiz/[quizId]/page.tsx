@@ -55,9 +55,11 @@ export default function QuizPage() {
     setQuestions(questionsRes.data || [])
 
     // Extract unique lecture tags
-    const tags = [...new Set((questionsRes.data || []).map(q => q.lecture_tag).filter(Boolean))] as string[]
-    tags.sort()
-    setLectureTags(tags)
+const tags = Array.from(
+  new Set((questionsRes.data || []).map((q: any) => q.lecture_tag).filter(Boolean))
+) as string[]
+tags.sort()
+setLectureTags(tags)
 
     setLoading(false)
   }
