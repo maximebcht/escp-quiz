@@ -74,7 +74,7 @@ export default function QuizPage() {
     setQuiz(quizRes.data)
     setQuestions(questionsRes.data || [])
 
-    const tags = [...new Set((questionsRes.data || []).map(q => q.lecture_tag).filter(Boolean))] as string[]
+    const tags = Array.from(new Set((questionsRes.data || []).map(q => q.lecture_tag).filter(Boolean))) as string[]
     tags.sort()
     setLectureTags(tags)
     setLoading(false)
