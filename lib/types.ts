@@ -33,6 +33,7 @@ export interface Question {
   question_text: string
   options: string[]
   correct_index: number
+  correct_indices: number[] | null  // NEW: for multi-answer questions
   explanation: string | null
   lecture_tag: string | null
   sort_order: number
@@ -45,7 +46,7 @@ export interface QuizAttempt {
   score: number
   total: number
   percentage: number
-  answers: number[]
+  answers: number[] | number[][]  // UPDATED: supports both formats
   started_at: string
   completed_at: string
   quizzes?: Quiz
