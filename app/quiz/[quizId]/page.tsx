@@ -6,7 +6,26 @@ import { useRouter, useParams } from 'next/navigation'
 import type { Quiz, Question } from '@/lib/types'
 import Link from 'next/link'
 
-const LETTERS = ['A', 'B', 'C', 'D']
+const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F']
+
+// Helper: get correct indices for a question (supports both old and new format)
+function getCorrectIndices(q: Question): number[] {
+  if (q.correct_indices && Array.isArray(q.correct_indices) && q.correct_indices.length > 0) {
+    return q.correct_indices
+  }
+  return [q.correct_index]
+}
+
+function isMultiAnswer(q: Question): boolean {
+  return getCorrectIndices(q).length > 1
+}
+
+function arraysEqual(a: number[], b: number[]): boolean {
+  if (a.length !== b.length) return false
+  const sa = [...a].sort()
+  const sb = [...b].sort()
+  return sa.every((v, i) => v === sb[i])
+}
 
 export default function QuizPage() {
   const supabase = createClient()
@@ -22,15 +41,16 @@ export default function QuizPage() {
   // Quiz state
   const [started, setStarted] = useState(false)
   const [currentIndex, setCurrentIndex] = useState(0)
-  const [answers, setAnswers] = useState<number[]>([])
-  const [selected, setSelected] = useState<number | null>(null)
+  const [answers, setAnswers] = useState<number[][]>([]) // Changed: array of arrays
+  const [selected, setSelected] = useState<number[]>([]) // Changed: array for multi-select
+  const [confirmed, setConfirmed] = useState(false) // New: for multi-answer confirmation
   const [finished, setFinished] = useState(false)
   const [saving, setSaving] = useState(false)
   const [filter, setFilter] = useState<'all' | 'wrong' | 'correct'>('all')
   const [openReview, setOpenReview] = useState<Record<number, boolean>>({})
   const [startedAt, setStartedAt] = useState<string>('')
 
-  // Lecture filter for per-lecture mode
+  // Lecture filter
   const [lectureTags, setLectureTags] = useState<string[]>([])
   const [selectedLecture, setSelectedLecture] = useState<string | null>(null)
   const [filteredQuestions, setFilteredQuestions] = useState<Question[]>([])
@@ -54,13 +74,9 @@ export default function QuizPage() {
     setQuiz(quizRes.data)
     setQuestions(questionsRes.data || [])
 
-    // Extract unique lecture tags
-const tags = Array.from(
-  new Set((questionsRes.data || []).map((q: any) => q.lecture_tag).filter(Boolean))
-) as string[]
-tags.sort()
-setLectureTags(tags)
-
+    const tags = [...new Set((questionsRes.data || []).map(q => q.lecture_tag).filter(Boolean))] as string[]
+    tags.sort()
+    setLectureTags(tags)
     setLoading(false)
   }
 
@@ -72,7 +88,8 @@ setLectureTags(tags)
     setFilteredQuestions(qs)
     setCurrentIndex(0)
     setAnswers([])
-    setSelected(null)
+    setSelected([])
+    setConfirmed(false)
     setFinished(false)
     setStarted(true)
     setStartedAt(new Date().toISOString())
@@ -81,34 +98,67 @@ setLectureTags(tags)
   }
 
   function pick(index: number) {
-    if (selected !== null) return
-    setSelected(index)
+    if (confirmed) return
+    const currentQ = filteredQuestions[currentIndex]
+
+    if (isMultiAnswer(currentQ)) {
+      // Toggle selection for multi-answer
+      setSelected(prev =>
+        prev.includes(index)
+          ? prev.filter(i => i !== index)
+          : [...prev, index]
+      )
+    } else {
+      // Single answer: select and auto-advance
+      setSelected([index])
+      setTimeout(() => {
+        const newAnswers = [...answers, [index]]
+        setAnswers(newAnswers)
+        setSelected([])
+        setConfirmed(false)
+
+        if (currentIndex + 1 < filteredQuestions.length) {
+          setCurrentIndex(currentIndex + 1)
+        } else {
+          finishQuiz(newAnswers)
+        }
+      }, 350)
+    }
+  }
+
+  function confirmMulti() {
+    if (selected.length === 0) return
+    setConfirmed(true)
 
     setTimeout(() => {
-      const newAnswers = [...answers, index]
+      const newAnswers = [...answers, [...selected]]
       setAnswers(newAnswers)
-      setSelected(null)
+      setSelected([])
+      setConfirmed(false)
 
       if (currentIndex + 1 < filteredQuestions.length) {
         setCurrentIndex(currentIndex + 1)
       } else {
-        // Quiz complete - save results
         finishQuiz(newAnswers)
       }
     }, 350)
   }
 
-  async function finishQuiz(finalAnswers: number[]) {
+  async function finishQuiz(finalAnswers: number[][]) {
     setFinished(true)
     setSaving(true)
 
     let score = 0
     filteredQuestions.forEach((q, i) => {
-      if (finalAnswers[i] === q.correct_index) score++
+      const correct = getCorrectIndices(q)
+      if (arraysEqual(finalAnswers[i] || [], correct)) score++
     })
 
     const percentage = (score / filteredQuestions.length) * 100
 
+    // Store flattened answers for backwards compatibility
+    // For single-answer questions, store the single index
+    // For multi-answer, store the array
     await supabase.from('quiz_attempts').insert({
       user_id: userId,
       quiz_id: quizId,
@@ -135,11 +185,15 @@ setLectureTags(tags)
 
   // Score calculation
   let score = 0
-  if (finished) {
+  const wrongCount = finished ? filteredQuestions.length - (() => {
+    let s = 0
     filteredQuestions.forEach((q, i) => {
-      if (answers[i] === q.correct_index) score++
+      if (arraysEqual(answers[i] || [], getCorrectIndices(q))) s++
     })
-  }
+    score = s
+    return s
+  })() : 0
+
   const percentage = finished ? Math.round((score / filteredQuestions.length) * 100) : 0
   const scoreClass = percentage >= 70 ? 'text-ok' : percentage >= 50 ? 'text-yellow-400' : 'text-no'
 
@@ -158,7 +212,6 @@ setLectureTags(tags)
           {quiz?.description && <p className="text-dim mb-2">{quiz.description}</p>}
           <p className="text-dim2 text-sm mb-8">{questions.length} questions</p>
 
-          {/* Full quiz button */}
           <button
             onClick={() => startQuiz(null)}
             className="w-full max-w-xs mx-auto mb-4 py-3 bg-accent text-white font-bold rounded-xl hover:brightness-110 transition block"
@@ -166,7 +219,6 @@ setLectureTags(tags)
             Start Full Quiz ({questions.length} questions)
           </button>
 
-          {/* Per-lecture buttons */}
           {lectureTags.length > 1 && (
             <>
               <div className="text-sm text-dim2 my-6">— or practice by lecture —</div>
@@ -177,10 +229,10 @@ setLectureTags(tags)
                     <button
                       key={tag}
                       onClick={() => startQuiz(tag)}
-                      className="py-3 px-4 bg-surface border border-border rounded-xl text-sm font-semibold hover:border-accent hover:text-accent transition text-left flex justify-between items-center"
+                      className="py-3 px-4 bg-surface border border-border rounded-xl hover:border-accent transition flex justify-between items-center"
                     >
-                      <span>{tag}</span>
-                      <span className="text-xs text-dim2">{count}Q</span>
+                      <span className="font-semibold text-sm">{tag}</span>
+                      <span className="text-dim2 text-xs">{count}Q</span>
                     </button>
                   )
                 })}
@@ -195,31 +247,23 @@ setLectureTags(tags)
   // ==================== RESULTS SCREEN ====================
   if (finished) {
     const reviewQuestions = filteredQuestions
-      .map((q, i) => ({ q, i, correct: answers[i] === q.correct_index }))
-      .filter(item => {
-        if (filter === 'wrong') return !item.correct
-        if (filter === 'correct') return item.correct
-        return true
+      .map((q, i) => {
+        const correct = arraysEqual(answers[i] || [], getCorrectIndices(q))
+        return { q, i, correct }
       })
-
-    const wrongCount = filteredQuestions.filter((q, i) => answers[i] !== q.correct_index).length
+      .filter(item =>
+        filter === 'all' ? true :
+        filter === 'wrong' ? !item.correct :
+        item.correct
+      )
 
     return (
       <div className="min-h-screen">
-        <header className="border-b border-border bg-surface/50 backdrop-blur-sm sticky top-0 z-10">
-          <div className="max-w-3xl mx-auto px-4 py-3 flex items-center gap-3">
-            <Link href="/dashboard" className="text-dim hover:text-accent transition">← Dashboard</Link>
-          </div>
-        </header>
-
-        <div className="max-w-3xl mx-auto px-4 py-8 animate-fadeUp">
-          {/* Score header */}
-          <div className="text-center mb-8">
-            <h2 className="text-xl font-extrabold mb-1">Quiz Complete!</h2>
-            <div className={`text-5xl font-extrabold my-3 ${scoreClass}`}>
-              {score}/{filteredQuestions.length}
-            </div>
-            <p className="text-dim">{percentage}% correct</p>
+        <div className="max-w-2xl mx-auto px-4 py-10 animate-fadeUp">
+          {/* Score */}
+          <div className="text-center mb-6">
+            <div className={`text-5xl font-extrabold ${scoreClass}`}>{score}/{filteredQuestions.length}</div>
+            <div className={`text-lg font-semibold ${scoreClass}`}>{percentage}%</div>
             {saving && <p className="text-xs text-dim2 mt-2">Saving result...</p>}
           </div>
 
@@ -268,45 +312,50 @@ setLectureTags(tags)
             ))}
           </div>
 
-          {/* Review list */}
+          {/* Review */}
           <div className="space-y-2">
-            {reviewQuestions.map(({ q, i, correct }) => (
-              <div key={i} className={`border rounded-xl overflow-hidden ${correct ? 'border-ok/20' : 'border-no/20'}`}>
-                <button
-                  onClick={() => toggleReview(i)}
-                  className="w-full px-4 py-3 flex items-start gap-3 bg-surface hover:bg-surface2 transition text-left"
-                >
-                  <div className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
-                    correct ? 'bg-ok-bg text-ok' : 'bg-no-bg text-no'
-                  }`}>
-                    {correct ? '✓' : '✗'}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold">Q{i + 1}. {q.question_text}</div>
-                    {q.lecture_tag && <div className="text-xs text-dim2 mt-0.5">{q.lecture_tag}</div>}
-                  </div>
-                  <span className={`text-dim text-xs transition ${openReview[i] ? 'rotate-180' : ''}`}>▾</span>
-                </button>
+            {reviewQuestions.map(({ q, i, correct }) => {
+              const correctIndices = getCorrectIndices(q)
+              const userAnswer = answers[i] || []
 
-                {openReview[i] && (
-                  <div className="px-4 pb-4 bg-surface space-y-2">
-                    {!correct && (
-                      <div className="px-3 py-2 rounded-lg bg-no-bg text-no text-sm">
-                        Your answer: {LETTERS[answers[i]]}. {q.options[answers[i]]}
-                      </div>
-                    )}
-                    <div className="px-3 py-2 rounded-lg bg-ok-bg text-ok text-sm">
-                      Correct answer: {LETTERS[q.correct_index]}. {q.options[q.correct_index]}
+              return (
+                <div key={i} className={`border rounded-xl overflow-hidden ${correct ? 'border-ok/20' : 'border-no/20'}`}>
+                  <button
+                    onClick={() => toggleReview(i)}
+                    className="w-full px-4 py-3 flex items-start gap-3 bg-surface hover:bg-surface2 transition text-left"
+                  >
+                    <div className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
+                      correct ? 'bg-ok-bg text-ok' : 'bg-no-bg text-no'
+                    }`}>
+                      {correct ? '✓' : '✗'}
                     </div>
-                    {q.explanation && (
-                      <div className="px-3 py-2 rounded-lg bg-surface2 text-dim text-sm leading-relaxed">
-                        {q.explanation}
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-semibold">Q{i + 1}. {q.question_text}</div>
+                      {q.lecture_tag && <div className="text-xs text-dim2 mt-0.5">{q.lecture_tag}</div>}
+                    </div>
+                    <span className={`text-dim text-xs transition ${openReview[i] ? 'rotate-180' : ''}`}>▾</span>
+                  </button>
+
+                  {openReview[i] && (
+                    <div className="px-4 pb-4 bg-surface space-y-2">
+                      {!correct && (
+                        <div className="px-3 py-2 rounded-lg bg-no-bg text-no text-sm">
+                          Your answer: {userAnswer.map(a => `${LETTERS[a]}. ${q.options[a]}`).join(', ')}
+                        </div>
+                      )}
+                      <div className="px-3 py-2 rounded-lg bg-ok-bg text-ok text-sm">
+                        Correct answer{correctIndices.length > 1 ? 's' : ''}: {correctIndices.map(a => `${LETTERS[a]}. ${q.options[a]}`).join(', ')}
                       </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
+                      {q.explanation && (
+                        <div className="px-3 py-2 rounded-lg bg-surface2 text-dim text-sm leading-relaxed">
+                          {q.explanation}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         </div>
       </div>
@@ -316,6 +365,7 @@ setLectureTags(tags)
   // ==================== QUESTION SCREEN ====================
   const currentQ = filteredQuestions[currentIndex]
   const progress = ((currentIndex) / filteredQuestions.length * 100).toFixed(1)
+  const multi = isMultiAnswer(currentQ)
 
   return (
     <div className="min-h-screen">
@@ -341,41 +391,58 @@ setLectureTags(tags)
         </div>
 
         {/* Question */}
-        <p className="text-lg font-semibold leading-relaxed mb-7">
+        <p className="text-lg font-semibold leading-relaxed mb-4">
           {currentQ.question_text}
         </p>
+
+        {/* Multi-answer badge */}
+        {multi && (
+          <div className="mb-5 inline-flex items-center gap-1.5 text-xs font-semibold text-accent bg-accent-glow px-3 py-1.5 rounded-lg">
+            ⚡ Multiple correct answers — select all that apply
+          </div>
+        )}
 
         {/* Options */}
         <div className="space-y-3">
           {currentQ.options.map((opt, i) => {
-            const isSel = selected === i
-            const isLocked = selected !== null && selected !== i
+            const isSel = selected.includes(i)
+            const isLocked = !multi && selected.length > 0 && !isSel
 
             return (
               <button
                 key={i}
                 onClick={() => pick(i)}
-                disabled={selected !== null}
+                disabled={confirmed || (!multi && selected.length > 0)}
                 className={`w-full text-left px-4 py-3.5 bg-surface border rounded-xl flex items-start gap-3 transition ${
                   isSel
                     ? 'border-accent bg-accent-glow'
                     : isLocked
-                    ? 'border-border opacity-50 cursor-default'
-                    : 'border-border hover:border-accent-dark hover:bg-surface2 cursor-pointer'
+                    ? 'opacity-50 cursor-not-allowed border-border'
+                    : 'border-border hover:border-accent/50'
                 }`}
               >
-                <span className={`flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold transition ${
-                  isSel
-                    ? 'bg-accent text-white'
-                    : 'bg-surface3 text-dim'
+                <span className={`flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold ${
+                  isSel ? 'bg-accent text-white' : 'bg-surface2'
                 }`}>
                   {LETTERS[i]}
                 </span>
-                <span className="text-sm font-medium">{opt}</span>
+                <span className="pt-0.5 leading-relaxed">{opt}</span>
               </button>
             )
           })}
         </div>
+
+        {/* Confirm button for multi-answer questions */}
+        {multi && selected.length > 0 && !confirmed && (
+          <div className="mt-5">
+            <button
+              onClick={confirmMulti}
+              className="w-full py-3 bg-accent text-white font-bold rounded-xl hover:brightness-110 transition"
+            >
+              Confirm selection ({selected.length} selected)
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
